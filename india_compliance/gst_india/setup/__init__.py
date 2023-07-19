@@ -143,12 +143,15 @@ def set_default_gst_settings():
         "enable_e_waybill": 1,
         "e_waybill_threshold": 50000,
         # Default API Settings
+        "enable_api": 1,
         "fetch_e_waybill_data": 1,
         "attach_e_waybill_print": 1,
         "auto_generate_e_waybill": 1,
         "auto_generate_e_invoice": 1,
+        "generate_e_waybill_with_e_invoice": 1,
         "e_invoice_applicable_from": nowdate(),
-        "auto_fill_party_info": 1,
+        "autofill_party_info": 1,
+        "archive_party_info_days": 7,
     }
 
     if frappe.conf.developer_mode:
@@ -179,9 +182,8 @@ def set_default_accounts_settings():
 
     show_accounts_settings_override_warning()
 
-    frappe.db.set_value(
+    frappe.db.set_single_value(
         "Accounts Settings",
-        None,
         {
             "determine_address_tax_category_from": "Billing Address",
             "add_taxes_from_item_tax_template": 0,

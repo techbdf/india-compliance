@@ -18,7 +18,7 @@ before_uninstall = "india_compliance.uninstall.before_uninstall"
 
 setup_wizard_requires = "assets/india_compliance/js/setup_wizard.js"
 setup_wizard_complete = "india_compliance.gst_india.setup.setup_wizard_complete"
-setup_wizard_stages = "india_compliance.audit_trail.setup.get_setup_wizard_stages"
+setup_wizard_stages = "india_compliance.setup_wizard.get_setup_wizard_stages"
 
 app_include_js = "india_compliance.bundle.js"
 
@@ -81,7 +81,13 @@ doc_events = {
             "india_compliance.gst_india.overrides.transaction.validate_transaction"
         ),
     },
+    "GL Entry": {
+        "validate": "india_compliance.gst_india.overrides.gl_entry.validate",
+    },
     "Item": {"validate": "india_compliance.gst_india.overrides.item.validate"},
+    "Journal Entry": {
+        "validate": "india_compliance.gst_india.overrides.journal_entry.validate",
+    },
     "Payment Entry": {
         "validate": (
             "india_compliance.gst_india.overrides.payment_entry.update_place_of_supply"
@@ -158,6 +164,7 @@ regional_overrides = {
             "india_compliance.gst_india.utils.get_itemised_tax_breakup_data"
         ),
         "erpnext.controllers.taxes_and_totals.get_regional_round_off_accounts": "india_compliance.gst_india.overrides.transaction.get_regional_round_off_accounts",
+        "erpnext.controllers.accounts_controller.update_gl_dict_with_regional_fields": "india_compliance.gst_india.overrides.gl_entry.update_gl_dict_with_regional_fields",
         "erpnext.accounts.party.get_regional_address_details": (
             "india_compliance.gst_india.overrides.transaction.update_party_details"
         ),
@@ -189,6 +196,9 @@ override_doctype_dashboards = {
     ),
     "Delivery Note": (
         "india_compliance.gst_india.overrides.delivery_note.get_dashboard_data"
+    ),
+    "Purchase Invoice": (
+        "india_compliance.gst_india.overrides.purchase_invoice.get_dashboard_data"
     ),
 }
 
