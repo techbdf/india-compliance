@@ -16,6 +16,10 @@ for (const doctype of TRANSACTION_DOCTYPES) {
     validate_overseas_gst_category(doctype);
 }
 
+for (const doctype of ["Sales Invoice", "Delivery Note"]) {
+    ignore_port_code_validation(doctype);
+}
+
 function fetch_gst_details(doctype) {
     const event_fields = ["tax_category", "company_gstin", "place_of_supply"];
 
@@ -121,15 +125,34 @@ function validate_overseas_gst_category(doctype) {
     frappe.ui.form.on(doctype, {
         gst_category(frm) {
             const { enable_overseas_transactions } = gst_settings;
-            if (
-                !["SEZ", "Overseas"].includes(frm.doc.gst_category) ||
-                enable_overseas_transactions
-            )
-                return;
+            if (!is_overseas_transaction(frm) || enable_overseas_transactions) return;
 
             frappe.throw(
                 __("Please enable SEZ / Overseas transactions in GST Settings first")
             );
         },
     });
+}
+
+function is_overseas_transaction(frm) {
+    if (frm.doc.gst_category === "SEZ") return true;
+
+    if (frappe.boot.sales_doctypes) return is_foreign_transaction(frm);
+
+    return frm.doc.gst_category === "Overseas";
+}
+
+function ignore_port_code_validation(doctype) {
+    frappe.ui.form.on(doctype, {
+        onload(frm) {
+            frm.set_df_property("port_code", "ignore_validation", 1);
+        },
+    });
+}
+
+function is_foreign_transaction(frm) {
+    return (
+        frm.doc.gst_category === "Overseas" &&
+        frm.doc.place_of_supply === "96-Other Countries"
+    );
 }

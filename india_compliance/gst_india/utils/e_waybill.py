@@ -15,6 +15,7 @@ from india_compliance.gst_india.constants.e_waybill import (
     UPDATE_VEHICLE_REASON_CODES,
 )
 from india_compliance.gst_india.utils import (
+    is_foreign_doc,
     load_doc,
     parse_datetime,
     send_updated_doc,
@@ -90,6 +91,10 @@ def _generate_e_waybill(doc, throw=True):
 
     api = EWaybillAPI if not with_irn else EInvoiceAPI
     result = api(doc).generate_e_waybill(data)
+
+    if result.error_code == "4002":
+        result = api(doc).get_e_waybill_by_irn(doc.get("irn"))
+
     log_and_process_e_waybill_generation(doc, result, with_irn=with_irn)
 
     if not frappe.request:
@@ -726,7 +731,7 @@ class EWaybillData(GSTTransactionData):
                 }
             )
 
-        elif self.doc.gst_category == "Overseas":
+        elif is_foreign_doc(self.doc):
             self.transaction_details.sub_supply_type = 3
 
             if not self.doc.is_export_with_gst:
@@ -744,7 +749,7 @@ class EWaybillData(GSTTransactionData):
         transaction_type = 1
         ship_to_address = (
             self.doc.port_address
-            if (self.doc.gst_category == "Overseas" and self.doc.port_address)
+            if (is_foreign_doc(self.doc) and self.doc.port_address)
             else self.doc.shipping_address_name
         )
 
@@ -811,8 +816,8 @@ class EWaybillData(GSTTransactionData):
         if self.transaction_details.distance > 100:
             frappe.throw(
                 _(
-                    "Distance should be less than 100km when the Pincode is same for"
-                    " Dispatch and Shipping Address"
+                    "Distance should be less than 100km when the PIN Code is same"
+                    " for Dispatch and Shipping Address"
                 )
             )
 

@@ -23,7 +23,7 @@ POST_INSTALL_PATCHES = (
     "update_state_name_to_puducherry",
     "rename_import_of_capital_goods",
     "update_hsn_code",
-    "create_company_fixtures",
+    "update_company_fixtures",
     "merge_utgst_account_into_sgst_account",
     "remove_consumer_gst_category",
     "migrate_e_invoice_settings_to_gst_settings",
@@ -34,6 +34,7 @@ POST_INSTALL_PATCHES = (
     "remove_deprecated_docs",
     "remove_old_fields",
     "update_custom_role_for_e_invoice_summary",
+    "update_company_gstin",
 )
 
 
