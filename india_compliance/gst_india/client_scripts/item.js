@@ -1,6 +1,14 @@
 frappe.ui.form.on('Item', {
 	onload: function(frm) {
-		india_compliance.set_hsn_code_query(frm.get_field("gst_hsn_code"));
+		if (!gst_settings.validate_hsn_code) return;
+		frm.set_query('gst_hsn_code', function() {
+			const wildcard = '_'.repeat(gst_settings.min_hsn_digits) + '%';
+			return {
+				filters: {
+					'name': ['like', wildcard]
+				}
+			};
+		});
 	},
 
 	gst_hsn_code: function(frm) {
