@@ -304,10 +304,6 @@ class BillofEntry(Document):
 
 @frappe.whitelist()
 def make_bill_of_entry(source_name, target_doc=None):
-    """
-    Permission checked in get_mapped_doc
-    """
-
     def set_missing_values(source, target):
         target.set_defaults()
 
@@ -369,10 +365,6 @@ def make_bill_of_entry(source_name, target_doc=None):
 
 @frappe.whitelist()
 def make_journal_entry_for_payment(source_name, target_doc=None):
-    """
-    Permission checked in get_mapped_doc
-    """
-
     def set_missing_values(source, target):
         target.voucher_type = "Bank Entry"
         target.posting_date = target.cheque_date = today()
@@ -419,10 +411,6 @@ def make_journal_entry_for_payment(source_name, target_doc=None):
 
 @frappe.whitelist()
 def make_landed_cost_voucher(source_name, target_doc=None):
-    """
-    Permission checked in get_mapped_doc
-    """
-
     def set_missing_values(source, target):
         items = get_items_for_landed_cost_voucher(source)
         if not items:

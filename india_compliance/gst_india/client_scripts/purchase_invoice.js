@@ -1,23 +1,4 @@
-const DOCTYPE = "Purchase Invoice";
-setup_e_waybill_actions(DOCTYPE);
-
-frappe.ui.form.on(DOCTYPE, {
-    after_save(frm) {
-        if (
-            frm.doc.docstatus ||
-            frm.doc.supplier_address ||
-            !is_e_waybill_applicable(frm)
-        )
-            return;
-
-        frappe.show_alert(
-            {
-                message: __("Supplier Address is required to create e-Waybill"),
-                indicator: "yellow",
-            },
-            10
-        );
-    },
+frappe.ui.form.on("Purchase Invoice", {
     refresh(frm) {
         if (
             frm.doc.docstatus !== 1 ||

@@ -39,7 +39,7 @@ def execute(filters=None):
 
 @frappe.whitelist()
 def get_pending_voucher_types(company=None):
-    frappe.has_permission("GST Settings", "write", throw=True)
+    frappe.has_permission("GST Settings", ptype="write", throw=True)
 
     company_accounts = ""
     if company:
@@ -50,7 +50,8 @@ def get_pending_voucher_types(company=None):
 
 @frappe.whitelist()
 def update_company_gstin():
-    frappe.has_permission("GST Settings", "write", throw=True)
+    frappe.has_permission("GST Settings", ptype="write", throw=True)
+
     return _update_company_gstin()
 
 
