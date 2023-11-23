@@ -31,6 +31,12 @@ def get_property_setters():
             prepend=False,
         ),
         {
+            "doctype": "Purchase Invoice",
+            "fieldname": "bill_no",
+            "property": "mandatory_depends_on",
+            "value": "eval: doc.gst_category !== 'Unregistered' && gst_settings.require_supplier_invoice_no === 1 && doc.company_gstin",
+        },
+        {
             "doctype": "Address",
             "fieldname": "state",
             "property": "fieldtype",
@@ -87,6 +93,12 @@ def get_property_setters():
             "fieldname": "tax_settings_section",
             "property": "collapsible",
             "value": "1",
+        },
+        {
+            "doctype": "Purchase Reconciliation Tool",
+            "doctype_or_field": "DocType",
+            "property": "default_email_template",
+            "value": "Purchase Reconciliation",
         },
     ]
 

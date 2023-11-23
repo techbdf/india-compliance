@@ -14,6 +14,7 @@ from india_compliance.gst_india.constants.custom_fields import (
     CUSTOM_FIELDS,
     E_INVOICE_FIELDS,
     E_WAYBILL_FIELDS,
+    HRMS_CUSTOM_FIELDS,
     SALES_REVERSE_CHARGE_FIELDS,
 )
 from india_compliance.gst_india.setup.property_setters import get_property_setters
@@ -28,6 +29,7 @@ def after_install():
     create_accounting_dimension_fields()
     create_property_setters()
     create_address_template()
+    create_email_template()
     set_default_gst_settings()
     set_default_accounts_settings()
     create_hsn_codes()
@@ -39,6 +41,12 @@ def create_custom_fields():
     # Will not fail if a core field with same name already exists (!)
     # Will update a custom field if it already exists
     _create_custom_fields(get_all_custom_fields(), ignore_validate=True)
+    if "hrms" in frappe.get_installed_apps():
+        create_hrms_custom_fields()
+
+
+def create_hrms_custom_fields():
+    _create_custom_fields(HRMS_CUSTOM_FIELDS, ignore_validate=True)
 
 
 def create_accounting_dimension_fields():
@@ -55,7 +63,7 @@ def create_accounting_dimension_fields():
 
 def create_property_setters():
     for property_setter in get_property_setters():
-        frappe.make_property_setter(property_setter)
+        frappe.make_property_setter(property_setter, validate_fields_for_doctype=False)
 
 
 def create_address_template():
@@ -74,6 +82,46 @@ def create_address_template():
             "template": address_html,
         }
     ).insert(ignore_permissions=True)
+
+
+EMAIL_TEMPLATE_DATA = {
+    "doctype": "Email Template",
+    "name": "Purchase Reconciliation",
+    "subject": "2A/2B Reconciliation for {{ supplier_name }}-{{ supplier_gstin }}",
+    "response": (
+        "Hello,<br><br>We have made a purchase reconciliation"
+        " for the period {{ inward_supply_from_date }} to {{ inward_supply_to_date }}"
+        " for purchases made by {{ company }} from you.<br><br>You are requested to kindly"
+        " make necessary corrections to the GST Portal on your end if required."
+        " The attached sheet is for your reference."
+    ),
+}
+
+
+def create_email_template():
+    if frappe.db.exists("Email Template", "Purchase Reconciliation"):
+        return
+
+    frappe.get_doc(EMAIL_TEMPLATE_DATA).insert(ignore_permissions=True)
+
+
+def update_default_email_template(old_name, new_name):
+    """
+    Update default email template in Property Setter for Purchase Reconciliation Tool
+    """
+
+    doctype = "Purchase Reconciliation Tool"
+    filters = {
+        "doc_type": doctype,
+        "property": "default_email_template",
+        "value": old_name,
+    }
+
+    if not frappe.db.exists("Property Setter", filters):
+        return
+
+    frappe.db.set_value("Property Setter", filters, "value", new_name)
+    frappe.clear_cache(doctype=doctype)
 
 
 def create_hsn_codes():
@@ -138,6 +186,7 @@ def set_default_gst_settings():
     default_settings = {
         "hsn_wise_tax_breakup": 1,
         "enable_reverse_charge_in_sales": 0,
+        "require_supplier_invoice_no": 1,
         "validate_hsn_code": 1,
         "min_hsn_digits": 6,
         "enable_e_waybill": 1,
@@ -152,6 +201,9 @@ def set_default_gst_settings():
         "e_invoice_applicable_from": nowdate(),
         "autofill_party_info": 1,
         "archive_party_info_days": 7,
+        "validate_gstin_status": 1,
+        "gstin_status_refresh_interval": 30,
+        "enable_retry_e_invoice_generation": 1,
     }
 
     if frappe.conf.developer_mode:

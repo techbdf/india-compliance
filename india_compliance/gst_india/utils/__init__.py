@@ -1,19 +1,31 @@
+import copy
+import io
+import tarfile
+
 from dateutil import parser
 from pytz import timezone
 from titlecase import titlecase as _titlecase
 
 import frappe
 from frappe import _
+from frappe.contacts.doctype.contact.contact import get_contact_details
 from frappe.desk.form.load import get_docinfo, run_onload
-from frappe.utils import cint, cstr, get_datetime, get_link_to_form, get_system_timezone
-from erpnext.controllers.taxes_and_totals import (
-    get_itemised_tax,
-    get_itemised_taxable_amount,
+from frappe.utils import (
+    add_to_date,
+    cint,
+    cstr,
+    get_datetime,
+    get_link_to_form,
+    get_system_timezone,
+    getdate,
 )
+from frappe.utils.data import get_timespan_date_range as _get_timespan_date_range
+from frappe.utils.file_manager import get_file_path
+from erpnext.accounts.party import get_default_contact
+from erpnext.accounts.utils import get_fiscal_year
 
 from india_compliance.gst_india.constants import (
     ABBREVIATIONS,
-    COUNTRY_CODES,
     E_INVOICE_MASTER_CODES_URL,
     GST_ACCOUNT_FIELDS,
     GSTIN_FORMATS,
@@ -78,8 +90,9 @@ def send_updated_doc(doc, set_docinfo=False):
 def get_gstin_list(party, party_type="Company"):
     """
     Returns a list the party's GSTINs.
-    This function doesn't check for permissions since GSTINs are publicly available.
     """
+
+    frappe.has_permission(party_type, doc=party, throw=True)
 
     gstin_list = frappe.get_all(
         "Address",
@@ -97,6 +110,38 @@ def get_gstin_list(party, party_type="Company"):
         gstin_list.insert(0, default_gstin)
 
     return gstin_list
+
+
+@frappe.whitelist()
+def get_party_for_gstin(gstin, party_type="Supplier"):
+    if not gstin:
+        return
+
+    if party := frappe.db.get_value(
+        party_type, filters={"gstin": gstin}, fieldname="name"
+    ):
+        return party
+
+    address = frappe.qb.DocType("Address")
+    links = frappe.qb.DocType("Dynamic Link")
+    party = (
+        frappe.qb.from_(address)
+        .join(links)
+        .on(links.parent == address.name)
+        .select(links.link_name)
+        .where(links.link_doctype == party_type)
+        .where(address.gstin == gstin)
+        .limit(1)
+        .run()
+    )
+    if party:
+        return party[0][0]
+
+
+@frappe.whitelist()
+def get_party_contact_details(party, party_type="Supplier"):
+    if party and (contact := get_default_contact(party_type, party)):
+        return get_contact_details(contact)
 
 
 def validate_gstin(
@@ -160,7 +205,9 @@ def validate_gst_category(gst_category, gstin):
 
     if gst_category == "Unregistered":
         frappe.throw(
-            "GST Category cannot be Unregistered for party with GSTIN",
+            _(
+                "GST Category cannot be Unregistered for party with GSTIN",
+            )
         )
 
     valid_gstin_format = GSTIN_FORMATS.get(gst_category)
@@ -204,7 +251,7 @@ def validate_pincode(address):
     first_three_digits = cint(address.pincode[:3])
     pincode_range = STATE_PINCODE_MAPPING[address.state]
 
-    if type(pincode_range[0]) == int:
+    if isinstance(pincode_range[0], int):
         pincode_range = (pincode_range,)
 
     for lower_limit, upper_limit in pincode_range:
@@ -213,8 +260,10 @@ def validate_pincode(address):
 
     frappe.throw(
         _(
-            "Postal Code {postal_code} for address {name} is not associated with {state}. Ensure the initial three digits"
-            " of your postal code align correctly with the state as per the <a href='{url}'>e-Invoice Master Codes</a>."
+            "Postal Code {postal_code} for address {name} is not associated with"
+            " {state}. Ensure the initial three digits of your postal code align"
+            " correctly with the state as per the <a href='{url}'>e-Invoice Master"
+            " Codes</a>."
         ).format(
             postal_code=frappe.bold(address.pincode),
             name=(
@@ -229,9 +278,14 @@ def validate_pincode(address):
     )
 
 
-def guess_gst_category(gstin: str | None, country: str | None) -> str:
+def guess_gst_category(
+    gstin: str | None, country: str | None, gst_category: str | None = None
+) -> str:
     if not gstin:
         if country and country != "India":
+            return "Overseas"
+
+        if not country and gst_category == "Overseas":
             return "Overseas"
 
         return "Unregistered"
@@ -240,6 +294,14 @@ def guess_gst_category(gstin: str | None, country: str | None) -> str:
         return "Tax Deductor"
 
     if GSTIN_FORMATS["Registered Regular"].match(gstin):
+        if gst_category in (
+            "Registered Regular",
+            "Registered Composition",
+            "SEZ",
+            "Deemed Export",
+        ):
+            return gst_category
+
         return "Registered Regular"
 
     if GSTIN_FORMATS["UIN Holders"].match(gstin):
@@ -283,7 +345,7 @@ def is_overseas_transaction(doctype, gst_category, place_of_supply):
     if gst_category == "SEZ":
         return True
 
-    if doctype in SALES_DOCTYPES:
+    if doctype in SALES_DOCTYPES or doctype == "Payment Entry":
         return is_foreign_transaction(gst_category, place_of_supply)
 
     return gst_category == "Overseas"
@@ -295,46 +357,6 @@ def is_foreign_doc(doc):
 
 def is_foreign_transaction(gst_category, place_of_supply):
     return gst_category == "Overseas" and place_of_supply == "96-Other Countries"
-
-
-def get_itemised_tax_breakup_data(doc, account_wise=False, hsn_wise=False):
-    itemised_tax = get_itemised_tax(doc.taxes, with_tax_account=account_wise)
-
-    itemised_taxable_amount = get_itemised_taxable_amount(doc.items)
-
-    if not frappe.get_meta(doc.doctype + " Item").has_field("gst_hsn_code"):
-        return itemised_tax, itemised_taxable_amount
-
-    hsn_wise_in_gst_settings = frappe.db.get_single_value(
-        "GST Settings", "hsn_wise_tax_breakup"
-    )
-
-    tax_breakup_hsn_wise = hsn_wise or hsn_wise_in_gst_settings
-    if tax_breakup_hsn_wise:
-        item_hsn_map = frappe._dict()
-        for d in doc.items:
-            item_hsn_map.setdefault(d.item_code or d.item_name, d.get("gst_hsn_code"))
-
-    hsn_tax = {}
-    for item, taxes in itemised_tax.items():
-        item_or_hsn = item if not tax_breakup_hsn_wise else item_hsn_map.get(item)
-        hsn_tax.setdefault(item_or_hsn, frappe._dict())
-        for tax_desc, tax_detail in taxes.items():
-            key = tax_desc
-            if account_wise:
-                key = tax_detail.get("tax_account")
-            hsn_tax[item_or_hsn].setdefault(key, {"tax_rate": 0, "tax_amount": 0})
-            hsn_tax[item_or_hsn][key]["tax_rate"] = tax_detail.get("tax_rate")
-            hsn_tax[item_or_hsn][key]["tax_amount"] += tax_detail.get("tax_amount")
-
-    # set taxable amount
-    hsn_taxable_amount = frappe._dict()
-    for item in itemised_taxable_amount:
-        item_or_hsn = item if not tax_breakup_hsn_wise else item_hsn_map.get(item)
-        hsn_taxable_amount.setdefault(item_or_hsn, 0)
-        hsn_taxable_amount[item_or_hsn] += itemised_taxable_amount.get(item)
-
-    return hsn_tax, hsn_taxable_amount
 
 
 def get_hsn_settings():
@@ -357,7 +379,7 @@ def get_place_of_supply(party_details, doctype):
     # fallback to company GSTIN for sales or supplier GSTIN for purchases
     # (in retail scenarios, customer / company GSTIN may not be set)
 
-    if doctype in SALES_DOCTYPES:
+    if doctype in SALES_DOCTYPES or doctype == "Payment Entry":
         # for exports, Place of Supply is set using GST category in absence of GSTIN
         if party_details.gst_category == "Overseas":
             return "96-Other Countries"
@@ -384,6 +406,28 @@ def get_place_of_supply(party_details, doctype):
 
     if state := get_state(state_code):
         return f"{state_code}-{state}"
+
+
+def get_escaped_gst_accounts(company, account_type, throw=True):
+    gst_accounts = get_gst_accounts_by_type(company, account_type, throw=throw)
+
+    for tax_type in gst_accounts:
+        gst_accounts[tax_type] = get_escaped_name(gst_accounts[tax_type])
+
+    return gst_accounts
+
+
+def get_escaped_name(name):
+    """
+    This function will replace % in account name with %% to escape it for PyPika
+    """
+    if not name:
+        return
+
+    if "%" not in name:
+        return name
+
+    return name.replace("%", "%%")
 
 
 def get_gst_accounts_by_type(company, account_type, throw=True):
@@ -419,6 +463,10 @@ def get_gst_accounts_by_type(company, account_type, throw=True):
 
 @frappe.whitelist()
 def get_all_gst_accounts(company):
+    """
+    Permission not checked here:
+    List of GST account names isn't considered sensitive data
+    """
     if not company:
         frappe.throw(_("Please set Company first"))
 
@@ -436,13 +484,20 @@ def get_all_gst_accounts(company):
     return accounts_list
 
 
-def parse_datetime(value, day_first=False):
+def parse_datetime(value, day_first=False, throw=True):
     """Convert IST string to offset-naive system time"""
 
     if not value:
         return
 
-    parsed = parser.parse(value, dayfirst=day_first)
+    try:
+        parsed = parser.parse(value, dayfirst=day_first)
+    except Exception as e:
+        if not throw:
+            return
+
+        raise e
+
     system_tz = get_system_timezone()
 
     if system_tz == TIMEZONE:
@@ -473,6 +528,10 @@ def as_ist(value=None):
         .astimezone(timezone(TIMEZONE))
         .replace(tzinfo=None)
     )
+
+
+def get_json_from_file(path):
+    return frappe._dict(frappe.get_file_json(get_file_path(path)))
 
 
 def join_list_with_custom_separators(input, separator=", ", last_separator=" or "):
@@ -523,6 +582,15 @@ def is_api_enabled(settings=None):
     return settings.enable_api and can_enable_api(settings)
 
 
+def is_autofill_party_info_enabled():
+    settings = frappe.get_cached_doc("GST Settings")
+    return (
+        is_api_enabled(settings)
+        and settings.autofill_party_info
+        and not settings.sandbox_mode
+    )
+
+
 def can_enable_api(settings):
     return settings.api_secret or frappe.conf.ic_api_secret
 
@@ -542,14 +610,11 @@ def get_gst_uom(uom, settings=None):
     return next((k for k, v in UOM_MAP.items() if v == uom), "OTH")
 
 
-def get_place_of_supply_options(*, as_list=False, with_other_countries=False):
+def get_place_of_supply_options(*, as_list=False):
     options = []
 
     for state_name, state_number in STATE_NUMBERS.items():
         options.append(f"{state_number}-{state_name}")
-
-    if with_other_countries:
-        options.append("96-Other Countries")
 
     if as_list:
         return options
@@ -576,7 +641,8 @@ def get_validated_country_code(country):
     if not code:
         frappe.throw(
             _(
-                "Country Code not found for {0}. Please set it as per the <a href='{1}'>e-Invoice Master Codes</a>"
+                "Country Code not found for {0}. Please set it as per the <a"
+                " href='{1}'>e-Invoice Master Codes</a>"
             ).format(
                 frappe.bold(get_link_to_form("Country", country)),
                 E_INVOICE_MASTER_CODES_URL,
@@ -585,14 +651,101 @@ def get_validated_country_code(country):
 
     code = code.upper()
 
-    if code not in COUNTRY_CODES:
+    if len(code) != 2:
         frappe.throw(
             _(
-                "Country Code {0} does not match with the <a href='{1}'>e-Invoice Master Codes</a>"
+                "Country Code for {0} ({1}) must be a 2-letter code. Please set it as per"
+                " the <a href='{2}'>e-Invoice Master Codes</a>"
             ).format(
-                frappe.bold(get_link_to_form("Country", country, code)),
+                frappe.bold(get_link_to_form("Country", country, country)),
+                frappe.bold(code),
                 E_INVOICE_MASTER_CODES_URL,
             )
         )
 
     return code
+
+
+def get_timespan_date_range(timespan: str, company: str | None = None) -> tuple | None:
+    date_range = _get_timespan_date_range(timespan)
+
+    if date_range:
+        return date_range
+
+    company = company or frappe.defaults.get_user_default("Company")
+
+    if timespan == "this fiscal year":
+        date = getdate()
+        fiscal_year = get_fiscal_year(date, company=company)
+        return (fiscal_year[1], fiscal_year[2])
+
+    if timespan == "last fiscal year":
+        date = add_to_date(getdate(), years=-1)
+        fiscal_year = get_fiscal_year(date, company=company)
+        return (fiscal_year[1], fiscal_year[2])
+
+    return
+
+
+def merge_dicts(d1: dict, d2: dict) -> dict:
+    """
+    Sample Input:
+    -------------
+    d1 = {
+        'key1': 'value1',
+        'key2': {'nested': 'value'},
+        'key3': ['value1'],
+        'key4': 'value4'
+    }
+    d2 = {
+        'key1': 'value2',
+        'key2': {'key': 'value3'},
+        'key3': ['value2'],
+        'key5': 'value5'
+    }
+
+    Sample Output:
+    --------------
+    {
+        'key1': 'value2',
+        'key2': {'nested': 'value', 'key': 'value3'},
+        'key3': ['value1', 'value2'],
+        'key4': 'value4',
+        'key5': 'value5'
+    }
+    """
+    for key in set(d1.keys()) | set(d2.keys()):
+        if key in d2 and key in d1:
+            if isinstance(d1[key], dict) and isinstance(d2[key], dict):
+                merge_dicts(d1[key], d2[key])
+
+            elif isinstance(d1[key], list) and isinstance(d2[key], list):
+                d1[key] = d1[key] + d2[key]
+
+            else:
+                d1[key] = copy.deepcopy(d2[key])
+
+        elif key in d2:
+            d1[key] = copy.deepcopy(d2[key])
+
+    return d1
+
+
+def tar_gz_bytes_to_data(tar_gz_bytes: bytes) -> str | None:
+    """
+    Return first file in tar.gz ending with .json
+    """
+    with tarfile.open(fileobj=io.BytesIO(tar_gz_bytes), mode="r:gz") as tar_gz_file:
+        for filename in tar_gz_file.getnames():
+            if not filename.endswith(".json"):
+                continue
+
+            file_in_tar = tar_gz_file.extractfile(filename)
+
+            if not file_in_tar:
+                continue
+
+            data = file_in_tar.read().decode("utf-8")
+            break
+
+    return data

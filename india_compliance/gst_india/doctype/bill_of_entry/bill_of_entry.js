@@ -8,6 +8,8 @@ frappe.ui.form.on("Bill of Entry", {
     },
 
     refresh(frm) {
+        india_compliance.set_reconciliation_status(frm, "bill_of_entry_no");
+
         if (frm.doc.docstatus === 0) return;
 
         // check if Journal Entry exists;
@@ -24,7 +26,14 @@ frappe.ui.form.on("Bill of Entry", {
             );
         }
 
-        if (frm.doc.docstatus === 1 && frm.doc.total_customs_duty > 0) {
+        const has_ineligible_items = frm.doc.items.some(
+            item => item.is_ineligible_for_itc
+        );
+
+        if (
+            (frm.doc.docstatus === 1 && frm.doc.total_customs_duty > 0) ||
+            has_ineligible_items
+        ) {
             frm.add_custom_button(
                 __("Landed Cost Voucher"),
                 () => {
@@ -305,7 +314,7 @@ class TaxesController {
          * - Update for all tax rows when cdt is null.
          * - Update for a single tax row when cdt and cdn are passed.
          *
-         * @param {string} cdt - Doctype of the tax row.
+         * @param {string} cdt - DocType of the tax row.
          * @param {string} cdn - Name of the tax row.
          */
 

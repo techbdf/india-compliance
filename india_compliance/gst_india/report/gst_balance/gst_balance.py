@@ -39,7 +39,7 @@ def execute(filters=None):
 
 @frappe.whitelist()
 def get_pending_voucher_types(company=None):
-    frappe.has_permission("GST Settings", ptype="write", throw=True)
+    frappe.has_permission("GST Settings", "write", throw=True)
 
     company_accounts = ""
     if company:
@@ -50,8 +50,7 @@ def get_pending_voucher_types(company=None):
 
 @frappe.whitelist()
 def update_company_gstin():
-    frappe.has_permission("GST Settings", ptype="write", throw=True)
-
+    frappe.has_permission("GST Settings", "write", throw=True)
     return _update_company_gstin()
 
 
@@ -92,42 +91,42 @@ class GSTBalanceReport:
                     "fieldname": "opening_debit",
                     "label": _("Opening (Dr)"),
                     "fieldtype": "Currency",
-                    "options": "currency",
+                    "options": "Company:company:default_currency",
                     "width": 150,
                 },
                 {
                     "fieldname": "opening_credit",
                     "label": _("Opening (Cr)"),
                     "fieldtype": "Currency",
-                    "options": "currency",
+                    "options": "Company:company:default_currency",
                     "width": 150,
                 },
                 {
                     "fieldname": "debit",
                     "label": _("Debit"),
                     "fieldtype": "Currency",
-                    "options": "currency",
+                    "options": "Company:company:default_currency",
                     "width": 150,
                 },
                 {
                     "fieldname": "credit",
                     "label": _("Credit"),
                     "fieldtype": "Currency",
-                    "options": "currency",
+                    "options": "Company:company:default_currency",
                     "width": 150,
                 },
                 {
                     "fieldname": "closing_debit",
                     "label": _("Closing (Dr)"),
                     "fieldtype": "Currency",
-                    "options": "currency",
+                    "options": "Company:company:default_currency",
                     "width": 150,
                 },
                 {
                     "fieldname": "closing_credit",
                     "label": _("Closing (Cr)"),
                     "fieldtype": "Currency",
-                    "options": "currency",
+                    "options": "Company:company:default_currency",
                     "width": 150,
                 },
             ]
@@ -150,7 +149,7 @@ class GSTBalanceReport:
                         "fieldname": f"gstin_{gstin}",
                         "label": gstin,
                         "fieldtype": "Currency",
-                        "options": "currency",
+                        "options": "Company:company:default_currency",
                         "width": 150,
                     }
                 )
@@ -180,15 +179,19 @@ class GSTBalanceReport:
                     "opening_credit": _process_opening_balance(account, is_debit=False),
                     "debit": transaction.get("debit", 0),
                     "credit": transaction.get("credit", 0),
+                    "closing_debit": 0,
+                    "closing_credit": 0,
                 }
             )
 
-            data[account]["closing_debit"] = (
+            closing_balance = (
                 data[account]["opening_debit"] + data[account]["debit"]
-            )
-            data[account]["closing_credit"] = (
-                data[account]["opening_credit"] + data[account]["credit"]
-            )
+            ) - (data[account]["opening_credit"] + data[account]["credit"])
+
+            if closing_balance > 0:
+                data[account]["closing_debit"] = closing_balance
+            else:
+                data[account]["closing_credit"] = abs(closing_balance)
 
         return list(data.values())
 

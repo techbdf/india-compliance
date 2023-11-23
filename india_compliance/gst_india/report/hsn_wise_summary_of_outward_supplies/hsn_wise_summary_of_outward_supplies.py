@@ -10,6 +10,7 @@ from frappe.model.meta import get_field_precision
 from frappe.utils import cstr, flt, getdate
 import erpnext
 
+from india_compliance.gst_india.constants import GST_ACCOUNT_FIELDS
 from india_compliance.gst_india.report.gstr_1.gstr_1 import get_company_gstin_number
 from india_compliance.gst_india.utils import get_gst_accounts_by_type, get_gst_uom
 
@@ -18,13 +19,20 @@ def execute(filters=None):
     if not filters:
         filters = {}
 
-    columns = get_columns()
+    validate_filters(filters)
 
-    output_gst_accounts = {
-        account
-        for account in get_gst_accounts_by_type(filters.company, "Output").values()
-        if account
-    }
+    columns = get_columns()
+    output_gst_accounts_dict = get_gst_accounts_by_type(filters.company, "Output")
+
+    output_gst_accounts = set()
+    non_cess_accounts = set()
+    for account_type, account_name in output_gst_accounts_dict.items():
+        if not account_name:
+            continue
+
+        output_gst_accounts.add(account_name)
+        if account_type in GST_ACCOUNT_FIELDS[:3]:
+            non_cess_accounts.add(account_name)
 
     company_currency = erpnext.get_company_currency(filters.company)
     item_list = get_items(filters)
@@ -53,8 +61,9 @@ def execute(filters=None):
         item_tax = itemised_tax.get((d.parent, d.item_code), {})
         for tax in tax_columns:
             tax_data = item_tax.get(tax, {})
-            tax_rate += flt(tax_data.get("tax_rate", 0))
             total_tax += flt(tax_data.get("tax_amount", 0))
+            if tax in non_cess_accounts:
+                tax_rate += flt(tax_data.get("tax_rate", 0))
 
         row = [
             d.gst_hsn_code,
@@ -76,6 +85,13 @@ def execute(filters=None):
         data = get_merged_data(columns, data)  # merge same hsn code data
 
     return columns, data
+
+
+def validate_filters(filters):
+    from_date, to_date = filters.get("from_date"), filters.get("to_date")
+
+    if from_date and to_date and getdate(to_date) < getdate(from_date):
+        frappe.throw(_("To Date cannot be less than From Date"))
 
 
 def get_columns():
@@ -115,12 +131,14 @@ def get_columns():
             "fieldname": "total_amount",
             "label": _("Total Amount"),
             "fieldtype": "Currency",
+            "options": "Company:company:default_currency",
             "width": 120,
         },
         {
             "fieldname": "taxable_amount",
             "label": _("Total Taxable Amount"),
             "fieldtype": "Currency",
+            "options": "Company:company:default_currency",
             "width": 170,
         },
     ]
@@ -185,6 +203,9 @@ def get_tax_accounts(
     company_currency,
     output_gst_accounts,
 ):
+    if not item_list:
+        return [], {}
+
     tax_doctype = "Sales Taxes and Charges"
     tax_columns = set()
     itemised_tax = {}
@@ -310,6 +331,8 @@ def get_hsn_wise_json_data(filters, report_data):
     count = 1
 
     for hsn in report_data:
+        if hsn.get("gst_hsn_code") == "Total":
+            continue
         row = {
             "num": count,
             "hsn_sc": hsn.get("gst_hsn_code"),

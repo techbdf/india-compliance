@@ -38,6 +38,7 @@ class GSTSettings(Document):
         self.validate_e_invoice_applicability_date()
         self.validate_credentials()
         self.clear_api_auth_session()
+        self.update_retry_e_invoice_scheduled_job()
 
     def clear_api_auth_session(self):
         if self.has_value_changed("api_secret") and self.api_secret:
@@ -49,9 +50,19 @@ class GSTSettings(Document):
 
     def on_update(self):
         self.update_custom_fields()
-
         # clear session boot cache
         frappe.cache().delete_keys("bootinfo")
+
+    def update_retry_e_invoice_scheduled_job(self):
+        if not self.has_value_changed("enable_retry_e_invoice_generation"):
+            return
+
+        frappe.db.set_value(
+            "Scheduled Job Type",
+            "e_invoice.retry_e_invoice_generation",
+            "stopped",
+            not self.enable_retry_e_invoice_generation,
+        )
 
     def validate_gst_accounts(self):
         account_list = []
@@ -133,7 +144,11 @@ class GSTSettings(Document):
             return
 
         for credential in self.credentials:
-            if credential.service == "Returns" or credential.password:
+            if credential.service == "Returns":
+                self.validate_app_key(credential)
+                continue
+
+            if credential.password:
                 continue
 
             frappe.throw(
@@ -159,6 +174,10 @@ class GSTSettings(Document):
                 alert=True,
             )
 
+    def validate_app_key(self, credential):
+        if not credential.app_key or len(credential.app_key) != 32:
+            credential.app_key = frappe.generate_hash(length=32)
+
     def validate_enable_api(self):
         if (
             self.enable_api
@@ -179,7 +198,8 @@ class GSTSettings(Document):
         ):
             frappe.msgprint(
                 _(
-                    "Autofill Party Information based on GSTIN is not supported in sandbox mode"
+                    "Autofill Party Information based on GSTIN is not supported in"
+                    " sandbox mode"
                 ),
             )
 
@@ -187,7 +207,8 @@ class GSTSettings(Document):
         if not self.e_invoice_applicable_companies:
             frappe.throw(
                 _(
-                    "You must select at least one company to which e-Invoice is Applicable"
+                    "You must select at least one company to which e-Invoice is"
+                    " Applicable"
                 )
             )
 
@@ -227,12 +248,12 @@ def disable_api_promo():
 
 @frappe.whitelist()
 def enqueue_update_gst_category():
+    frappe.has_permission("GST Settings", "write", throw=True)
+    frappe.enqueue(update_gst_category, queue="long", timeout=6000)
     frappe.msgprint(
         _("Updating GST Category in background"),
         alert=True,
     )
-
-    frappe.enqueue(update_gst_category, queue="long", timeout=6000)
 
 
 def update_gst_category():

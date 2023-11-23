@@ -13,6 +13,7 @@ from frappe.utils import (
     random_string,
 )
 
+from india_compliance.exceptions import GatewayTimeoutError
 from india_compliance.gst_india.api_classes.e_invoice import EInvoiceAPI
 from india_compliance.gst_india.constants import (
     CURRENCY_CODES,
@@ -59,7 +60,7 @@ def enqueue_bulk_e_invoice_generation(docnames):
     docnames = frappe.parse_json(docnames) if docnames.startswith("[") else [docnames]
     rq_job = frappe.enqueue(
         "india_compliance.gst_india.utils.e_invoice.generate_e_invoices",
-        queue="long",
+        queue="short" if len(docnames) < 5 else "long",
         timeout=len(docnames) * 240,  # 4 mins per e-Invoice
         docnames=docnames,
     )
@@ -67,35 +68,58 @@ def enqueue_bulk_e_invoice_generation(docnames):
     return rq_job.id
 
 
-def generate_e_invoices(docnames):
+def generate_e_invoices(docnames, force=False):
     """
     Bulk generate e-Invoices for the given Sales Invoices.
     Permission checks are done in the `generate_e_invoice` function.
     """
 
+    def log_error():
+        frappe.log_error(
+            title=_("e-Invoice generation failed for Sales Invoice {0}").format(
+                docname
+            ),
+            message=frappe.get_traceback(),
+        )
+
     for docname in docnames:
         try:
-            generate_e_invoice(docname)
+            generate_e_invoice(docname, throw=False, force=force)
+
+        except GatewayTimeoutError:
+            frappe.db.set_value(
+                "Sales Invoice",
+                {"name": ("in", docnames), "irn": ("is", "not set")},
+                "einvoice_status",
+                "Auto-Retry",
+            )
+
+            log_error()
+            frappe.clear_last_message()
 
         except Exception:
-            frappe.log_error(
-                title=_("e-Invoice generation failed for Sales Invoice {0}").format(
-                    docname
-                ),
-                message=frappe.get_traceback(),
-            )
+            log_error()
+            frappe.clear_last_message()
 
         finally:
             # each e-Invoice needs to be committed individually
-            # nosemgrep
-            frappe.db.commit()
+            frappe.db.commit()  # nosemgrep
 
 
 @frappe.whitelist()
-def generate_e_invoice(docname, throw=True):
+def generate_e_invoice(docname, throw=True, force=False):
     doc = load_doc("Sales Invoice", docname, "submit")
 
+    settings = frappe.get_cached_doc("GST Settings")
+
     try:
+        if (
+            not force
+            and settings.enable_retry_e_invoice_generation
+            and settings.is_retry_e_invoice_generation_pending
+        ):
+            raise GatewayTimeoutError
+
         data = EInvoiceData(doc).get_data()
         api = EInvoiceAPI(doc)
         result = api.generate_irn(data)
@@ -104,11 +128,64 @@ def generate_e_invoice(docname, throw=True):
         if result.InfCd == "DUPIRN":
             response = api.get_e_invoice_by_irn(result.Desc.Irn)
 
+            if signed_data := response.SignedInvoice:
+                invoice_data = json.loads(
+                    jwt.decode(signed_data, options={"verify_signature": False})["data"]
+                )
+
+                previous_invoice_amount = invoice_data.get("ValDtls").get("TotInvVal")
+                current_invoice_amount = data.get("ValDtls").get("TotInvVal")
+
+                if previous_invoice_amount != current_invoice_amount:
+                    frappe.throw(
+                        _(
+                            "e-Invoice is already available against Invoice {0} with a Grand Total of Rs.{1}"
+                            " Duplicate IRN requests are not considered by e-Invoice Portal."
+                        ).format(
+                            frappe.bold(invoice_data.get("DocDtls").get("No")),
+                            frappe.bold(previous_invoice_amount),
+                        )
+                    )
+
             # Handle error 2283:
             # IRN details cannot be provided as it is generated more than 2 days ago
             result = result.Desc if response.error_code == "2283" else response
 
+        # Handle Invalid GSTIN Error
+        if result.error_code in ("3028", "3029"):
+            gstin = data.get("BuyerDtls").get("Gstin")
+            response = api.sync_gstin_info(gstin)
+
+            if response.Status != "ACT":
+                frappe.throw(_("GSTIN {0} status is not Active").format(gstin))
+
+            result = api.generate_irn(data)
+
+    except GatewayTimeoutError as e:
+        einvoice_status = "Failed"
+
+        if settings.enable_retry_e_invoice_generation:
+            einvoice_status = "Auto-Retry"
+            settings.db_set(
+                "is_retry_e_invoice_generation_pending", 1, update_modified=False
+            )
+
+        doc.db_set({"einvoice_status": einvoice_status}, commit=True)
+
+        frappe.msgprint(
+            _(
+                "Government services are currently slow, resulting in a Gateway Timeout error."
+                " We apologize for the inconvenience caused. Your e-invoice generation will be automatically retried every 5 minutes."
+            ),
+            _("Warning"),
+            indicator="yellow",
+        )
+
+        raise e
+
     except frappe.ValidationError as e:
+        doc.db_set({"einvoice_status": "Failed"})
+
         if throw:
             raise e
 
@@ -121,7 +198,12 @@ def generate_e_invoice(docname, throw=True):
             _("Warning"),
             indicator="yellow",
         )
+
         return
+
+    except Exception as e:
+        doc.db_set({"einvoice_status": "Failed"})
+        raise e
 
     doc.db_set(
         {
@@ -149,6 +231,7 @@ def generate_e_invoice(docname, throw=True):
             "signed_invoice": result.SignedInvoice,
             "signed_qr_code": result.SignedQRCode,
             "invoice_data": invoice_data,
+            "is_generated_in_sandbox_mode": api.sandbox_mode,
         },
     )
 
@@ -183,13 +266,22 @@ def cancel_e_invoice(docname, values):
     }
 
     result = EInvoiceAPI(doc).cancel_irn(data)
+
+    log_and_process_e_invoice_cancellation(
+        doc, values, result, "e-Invoice cancelled successfully"
+    )
+
+    return send_updated_doc(doc)
+
+
+def log_and_process_e_invoice_cancellation(doc, values, result, message):
     log_e_invoice(
         doc,
         {
             "name": doc.irn,
             "is_cancelled": 1,
             "cancel_reason_code": values.reason,
-            "cancel_remark": values.remark,
+            "cancel_remark": values.remark or values.reason,
             "cancelled_on": (
                 get_datetime()  # Fallback to handle already cancelled IRN
                 if result.error_code == "9999"
@@ -198,12 +290,33 @@ def cancel_e_invoice(docname, values):
         },
     )
 
-    doc.db_set({"einvoice_status": "Cancelled", "irn": ""})
+    doc.db_set(
+        {
+            "einvoice_status": result.get("einvoice_status") or "Cancelled",
+            "irn": "",
+        }
+    )
 
-    frappe.msgprint(
-        _("e-Invoice cancelled successfully"),
-        indicator="green",
-        alert=True,
+    frappe.msgprint(_(message), indicator="green", alert=True)
+
+
+@frappe.whitelist()
+def mark_e_invoice_as_cancelled(doctype, docname, values):
+    doc = load_doc(doctype, docname, "cancel")
+
+    if doc.docstatus != 2:
+        return
+
+    values = frappe.parse_json(values)
+    result = frappe._dict(
+        {
+            "CancelDate": values.cancelled_on,
+            "einvoice_status": "Manually Cancelled",
+        }
+    )
+
+    log_and_process_e_invoice_cancellation(
+        doc, values, result, "e-Invoice marked as cancelled successfully"
     )
 
     return send_updated_doc(doc)
@@ -241,7 +354,8 @@ def validate_e_invoice_applicability(doc, gst_settings=None, throw=True):
     if doc.company_gstin == doc.billing_address_gstin:
         return _throw(
             _(
-                "e-Invoice is not applicable for invoices with same company and billing GSTIN"
+                "e-Invoice is not applicable for invoices with same company and billing"
+                " GSTIN"
             )
         )
 
@@ -264,12 +378,25 @@ def validate_e_invoice_applicability(doc, gst_settings=None, throw=True):
     if not gst_settings.enable_e_invoice:
         return _throw(_("e-Invoice is not enabled in GST Settings"))
 
-    validate_e_invoice_applicability_date(doc, gst_settings)
+    applicability_date = get_e_invoice_applicability_date(doc, gst_settings, throw)
+
+    if not applicability_date:
+        return _throw(
+            _("e-Invoice is not applicable for company {0}").format(doc.company)
+        )
+
+    if getdate(applicability_date) > getdate(doc.posting_date):
+        return _throw(
+            _(
+                "e-Invoice is not applicable for invoices before {0} as per your"
+                " GST Settings"
+            ).format(frappe.bold(format_date(applicability_date)))
+        )
 
     return True
 
 
-def validate_e_invoice_applicability_date(doc, settings=None):
+def get_e_invoice_applicability_date(doc, settings=None, throw=True):
     if not settings:
         settings = frappe.get_cached_doc("GST Settings")
 
@@ -282,17 +409,9 @@ def validate_e_invoice_applicability_date(doc, settings=None):
                 break
 
         else:
-            frappe.throw(
-                _("e-Invoice is not applicable for company {0}").format(doc.company)
-            )
+            return
 
-    if getdate(e_invoice_applicable_from) > getdate(doc.posting_date):
-        frappe.throw(
-            _(
-                "e-Invoice is not applicable for invoices before {0} as per your"
-                " GST Settings"
-            ).format(frappe.bold(format_date(e_invoice_applicable_from)))
-        )
+    return e_invoice_applicable_from
 
 
 def validate_if_e_invoice_can_be_cancelled(doc):
@@ -310,6 +429,34 @@ def validate_if_e_invoice_can_be_cancelled(doc):
         frappe.throw(
             _("e-Invoice can only be cancelled upto 24 hours after it is generated")
         )
+
+
+def retry_e_invoice_generation():
+    settings = frappe.get_cached_doc("GST Settings")
+    if (
+        not settings.enable_retry_e_invoice_generation
+        or not settings.is_retry_e_invoice_generation_pending
+    ):
+        return
+
+    settings.db_set("is_retry_e_invoice_generation_pending", 0, update_modified=False)
+
+    queued_sales_invoices = frappe.db.get_all(
+        "Sales Invoice", filters={"einvoice_status": "Auto-Retry"}, pluck="name"
+    )
+    if not queued_sales_invoices:
+        return
+
+    generate_e_invoices(queued_sales_invoices, force=True)
+
+
+def get_e_invoice_info(doc):
+    return frappe.db.get_value(
+        "e-Invoice Log",
+        doc.irn,
+        ("is_generated_in_sandbox_mode", "acknowledged_on"),
+        as_dict=True,
+    )
 
 
 class EInvoiceData(GSTTransactionData):
@@ -489,15 +636,15 @@ class EInvoiceData(GSTTransactionData):
                 self.doc.dispatch_address_name
             )
 
-        self.billing_address.legal_name = self.transaction_details.customer_name
+        self.billing_address.legal_name = self.transaction_details.party_name
         self.company_address.legal_name = self.transaction_details.company_name
 
     def get_invoice_data(self):
         if self.sandbox_mode:
             seller = {
-                "gstin": "01AMBPG7773M002",
-                "state_number": "01",
-                "pincode": 193501,
+                "gstin": "02AMBPG7773M002",
+                "state_number": "02",
+                "pincode": 171302,
             }
             self.company_address.update(seller)
             if self.dispatch_address:
@@ -523,7 +670,7 @@ class EInvoiceData(GSTTransactionData):
                 if self.transaction_details.total_igst_amount > 0:
                     self.transaction_details.place_of_supply = "36"
                 else:
-                    self.transaction_details.place_of_supply = "01"
+                    self.transaction_details.place_of_supply = "02"
 
         if self.doc.is_return:
             self.dispatch_address, self.shipping_address = (

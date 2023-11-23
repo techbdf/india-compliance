@@ -6,10 +6,15 @@ frappe.query_reports["e-Invoice Summary"] = {
         {
             fieldtype: "Link",
             options: "Company",
-            reqd: 1,
             fieldname: "company",
             label: __("Company"),
-            default: frappe.defaults.get_user_default("Company"),
+            get_query: function () {
+                return {
+                    filters: {
+                        country: "India",
+                    },
+                };
+            },
         },
         {
             fieldtype: "Link",
@@ -35,7 +40,7 @@ frappe.query_reports["e-Invoice Summary"] = {
             fieldtype: "Select",
             fieldname: "status",
             label: __("e-Invoice Status"),
-            options: "\nPending\nGenerated\nCancelled\nFailed",
+            options: "\nPending\nGenerated\nCancelled\nFailed\nNot Applicable",
         },
         {
             fieldtype: "Select",
@@ -48,16 +53,16 @@ frappe.query_reports["e-Invoice Summary"] = {
     formatter: function (value, row, column, data, default_formatter) {
         value = default_formatter(value, row, column, data);
 
-        if (column.fieldname == "einvoice_status" && value) {
-            if (value == "Pending")
-                value = `<span class="bold" style="color: var(--text-on-orange)">${value}</span>`;
-            else if (value == "Generated")
-                value = `<span class="bold" style="color: var(--text-on-green)">${value}</span>`;
-            else if (value == "Cancelled")
-                value = `<span class="bold" style="color: var(--text-on-red)">${value}</span>`;
-            else if (value == "Failed")
-                value = `<span class="bold"  style="color: var(--text-on-red)">${value}</span>`;
-        }
+        if (value == "Pending")
+            value = `<span class="bold" style="color: var(--text-on-orange)">${value}</span>`;
+        else if (["Generated", "Submitted"].includes(value))
+            value = `<span class="bold" style="color: var(--text-on-green)">${value}</span>`;
+        else if (value == "Cancelled")
+            value = `<span class="bold" style="color: var(--text-on-red)">${value}</span>`;
+        else if (value == "Failed")
+            value = `<span class="bold"  style="color: var(--text-on-red)">${value}</span>`;
+        else if (value == "Not Applicable")
+            value = `<span class="bold"  style="color: var(--text-on-grey)">${value}</span>`;
 
         return value;
     },
